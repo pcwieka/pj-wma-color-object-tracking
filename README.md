@@ -19,5 +19,5 @@ conda activate pja-wma
 To run the application execute:
 
 ```
-python color_object_tracker.py --video_path <path-to-video-file.mp4> --hue_tolerance 10 --saturation_tolerance 10 --value_tolerance 10
+python color_tracker.py --video_path <path-to-video-file.mp4> --hue_tolerance 10 --saturation_tolerance 60 --value_tolerance 60
 ```

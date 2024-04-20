@@ -18,17 +18,16 @@ class ProcessingType(Enum):
 
 # MODEL
 class ColorTracker:
-
-
-
-
-    def __init__(self, video_path:str, tracked_color:None|tuple[int,int,int]= None)-> None:
+    def __init__(self, video_path: str, hue_tolerance: int, saturation_tolerance: int, value_tolerance: int, tracked_color: None | tuple[int, int, int] = None) -> None:
         self._video = cv2.VideoCapture(video_path)
         if not self._video.isOpened():
             raise ValueError(f'Unable to open video at path {video_path}.')
         self._tracked_color = tracked_color
-        self._frame: None|np.ndarray = None
-        self._processed_frame: None|np.ndarray = None
+        self._hue_tolerance = hue_tolerance
+        self._saturation_tolerance = saturation_tolerance
+        self._value_tolerance = value_tolerance
+        self._frame: None | np.ndarray = None
+        self._processed_frame: None | np.ndarray = None
         self._processing_type: ProcessingType = ProcessingType.RAW
 
     def set_processing_type(self, ptype:ProcessingType)->None:
@@ -44,14 +43,19 @@ class ColorTracker:
             self._process_frame()
         return read_succesfull
 
-    def _process_frame(self)-> None:
+    def _process_frame(self) -> None:
         if self._processing_type == ProcessingType.RAW:
             self._processed_frame = self._frame
             return
-        hsv_frame:np.ndarray = cv2.cvtColor(self._frame, cv2.COLOR_RGB2HSV)
-        hue = hsv_frame[:,:,0]
-        saturation = hsv_frame[:,:,1]
-        value = hsv_frame[:,:,2]
+        hsv_frame: np.ndarray = cv2.cvtColor(self._frame, cv2.COLOR_RGB2HSV)
+        hue = hsv_frame[:, :, 0]
+        saturation = hsv_frame[:, :, 1]
+        value = hsv_frame[:, :, 2]
+
+        if self._processing_type in {ProcessingType.HUE, ProcessingType.SATURATION, ProcessingType.VALUE,
+                                     ProcessingType.MASK} and self._tracked_color is None:
+            raise ValueError('Attempted processing mode that requires a tracking color set without it set.')
+
         if self._processing_type == ProcessingType.HUE:
             self._processed_frame = hue
             return
@@ -62,36 +66,26 @@ class ColorTracker:
             self._processed_frame = value
             return
 
-        if self._tracked_color is None:
-            raise ValueError('Attempted processing mode that requires a tracking color set without it set.')
-        mask = np.zeros_like(hue)
-        mask[hue==self._tracked_color[0]] = 255
+        lower_bound = np.array(
+            [self._tracked_color[0] - self._hue_tolerance, self._tracked_color[1] - self._saturation_tolerance,
+             self._tracked_color[2] - self._value_tolerance], dtype=np.int32)
+        upper_bound = np.array(
+            [self._tracked_color[0] + self._hue_tolerance, self._tracked_color[1] + self._saturation_tolerance,
+             self._tracked_color[2] + self._value_tolerance], dtype=np.int32)
+        mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
         if self._processing_type == ProcessingType.MASK:
             self._processed_frame = mask
 
-
         contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        contours_poly = [None]*len(contours)
-        boundRect = [None]*len(contours)
-        centers = [None]*len(contours)
-        radius = [None]*len(contours)
-        for i, c in enumerate(contours):
-            contours_poly[i] = cv2.approxPolyDP(c, 3, True)
-            boundRect[i] = cv2.boundingRect(contours_poly[i])
-            centers[i], radius[i] = cv2.minEnclosingCircle(contours_poly[i])
-
-        drawing = np.zeros_like(mask, dtype=np.uint8)
-
-        for i in range(len(contours)):
-            color = (rng.randint(0,256), rng.randint(0,256), rng.randint(0,256))
-            cv2.drawContours(drawing, contours_poly, i, color)
-            cv2.rectangle(drawing, (int(boundRect[i][0]), int(boundRect[i][1])), \
-            (int(boundRect[i][0]+boundRect[i][2]), int(boundRect[i][1]+boundRect[i][3])), color, 2)
-            cv2.circle(drawing, (int(centers[i][0]), int(centers[i][1])), int(radius[i]), color, 2)
-
-        if self._processing_type == ProcessingType.TRACKER:
-            self._processed_frame = drawing
-
+        if contours:
+            if self._processing_type == ProcessingType.TRACKER:
+                largest_contour = max(contours, key=cv2.contourArea)
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                drawing = np.zeros_like(self._frame, dtype=np.uint8)
+                cv2.rectangle(drawing, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                self._processed_frame = cv2.addWeighted(self._frame, 0.8, drawing, 0.2, 0)
+        else:
+            self._processed_frame = self._frame.copy()
 
     def get_frame(self)->np.ndarray:
         if self._frame is None:
@@ -153,17 +147,20 @@ class EventHandler:
 
 
 
-def parse_arguments()-> argparse.Namespace:
+def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-v', '--video_path', type=str, required=True,
-                        help='Path to video that will be processed.')
+    parser.add_argument('-v', '--video_path', type=str, required=True, help='Path to video that will be processed.')
+    parser.add_argument('-ht', '--hue_tolerance', type=int, required=True, help='Hue tolerance for color tracking.')
+    parser.add_argument('-st', '--saturation_tolerance', type=int, required=True, help='Saturation tolerance for color tracking.')
+    parser.add_argument('-vt', '--value_tolerance', type=int, required=True, help='Value tolerance for value (brightness) in color tracking.')
     return parser.parse_args()
 
-def main(args: argparse.Namespace)-> None:
+
+def main(args: argparse.Namespace) -> None:
     try:
         WINDOW_NAME = 'Color tracker'
         WAITKEY_TIMEOUT = 10
-        tracker = ColorTracker(args.video_path)
+        tracker = ColorTracker(args.video_path, args.hue_tolerance, args.saturation_tolerance, args.value_tolerance)
         display = Display(WINDOW_NAME)
         event_handler = EventHandler(tracker, display, WAITKEY_TIMEOUT)
         while True:
@@ -172,7 +169,6 @@ def main(args: argparse.Namespace)-> None:
             display.update_display(tracker.get_processed_frame())
             if not event_handler.handle_events():
                 break
-
     except ValueError as e:
         print(e)
 
